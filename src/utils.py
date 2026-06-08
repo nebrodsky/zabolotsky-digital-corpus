@@ -125,6 +125,21 @@ def get_files_in_folder(folder_path, extension='.txt'):
 
     return files_list
 
+# ---------- SIMPLE TEXT UTILS --------------------
+
+def clean_punctuation(text):
+    """Удаляет знаки пунктуации из текста, заменяя их на пробелы."""
+    punct = '\'\",.!?;:—-""«»()[]/'
+    clean_text = text.lower()
+    for char in punct:
+        clean_text = clean_text.replace(char, ' ')
+    return clean_text
+
+def count_words(text, remove_punct=True):
+    """Подсчитывает количество слов в тексте."""
+    clean_text = clean_punctuation(text) if remove_punct else text
+    return len(clean_text.split())
+
 # ---------- FOR TEXT FORMATTING ------------------
 
 def format_separate_poem(text):
@@ -143,7 +158,7 @@ def get_sentences(text):
 def lemmatize_with_mystem(sentence):
     """
     Лемматизирует предложение: razdel для токенизации, MyStem для лемм и POS-тегов.
-    Обрабатывает спецсимволы лесенки Маяковского (_BRK_), цифровые токены и дефисные слова.
+    Обрабатывает спецсимволы разделения строки (_BRK_), цифровые токены и дефисные слова.
 
     Возвращает словарь:
         tokens            — список токенов (razdel)
