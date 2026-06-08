@@ -6,8 +6,6 @@ __pycache__/
 .DS_Store
 .env
 
-models/
-
 cor/
 
 src/test/
