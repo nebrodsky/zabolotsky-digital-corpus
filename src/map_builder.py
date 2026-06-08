@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import argparse
 import numpy as np
 import pandas as pd
 from collections import Counter
@@ -16,9 +17,9 @@ from src.utils import russian_stopwords
 # ── Настройки ────────────────────────────────────────────────────────────────
 
 AUTHOR_PRONOUNS = {"я", "мы", "вы", "наш", "ваш"}  # Авторские местоимения (не отсеиваются)
-TOP_N_WORDS     = 305    # топ-300 авторских слов + 5 гарантированных местоимений
-N_CLUSTERS      = 20     # количество кластеров K-Means
-UMAP_N_NEIGHBORS = 25    # параметр UMAP: локальность структуры
+TOP_N_WORDS     = 155    # топ-300 авторских слов + 5 гарантированных местоимений
+N_CLUSTERS      = 10     # количество кластеров K-Means
+UMAP_N_NEIGHBORS = 15    # параметр UMAP: локальность структуры
 UMAP_MIN_DIST   = 0.1   # параметр UMAP: минимальное расстояние между точками
 RANDOM_STATE    = 42
 
@@ -64,6 +65,25 @@ def load_corpus(database_path: str) -> list[dict]:
 
     print(f"  ✅ Загружено текстов: {len(corpus)}")
     return corpus
+
+
+def filter_corpus_by_years(corpus, year_start=None, year_end=None):
+    """Фильтрует корпус по заданному периоду включительно."""
+    if year_start is None and year_end is None:
+        return corpus
+
+    filtered = []
+    for item in corpus:
+        year = item.get("year_finished")
+        if year is None:
+            continue
+        if year_start is not None and year < year_start:
+            continue
+        if year_end is not None and year > year_end:
+            continue
+        filtered.append(item)
+
+    return filtered
 
 
 def get_top_words(corpus: list[dict], top_n: int, stopwords: set) -> list[str]:
@@ -243,6 +263,8 @@ def build_word_cluster_map(
     decay_distance: float = DECAY_DISTANCE,
     decay_brks: float   = DECAY_BRKS,
     decay_sents: float  = DECAY_SENTS,
+    year_start: int | None = None,
+    year_end: int | None = None,
     umap_n_neighbors: int = UMAP_N_NEIGHBORS,
     umap_min_dist: float  = UMAP_MIN_DIST,
     random_state: int   = RANDOM_STATE,
@@ -258,15 +280,23 @@ def build_word_cluster_map(
         print("❌ Корпус пустой. Проверьте путь к database.parquet.")
         return
 
+    if year_start is not None or year_end is not None:
+        period_label = f"{year_start if year_start is not None else '-∞'} — {year_end if year_end is not None else '+∞'}"
+        corpus = filter_corpus_by_years(corpus, year_start, year_end)
+        print(f"  ✅ Отфильтрован период: {period_label}. Текстов осталось: {len(corpus)}")
+
+    if not corpus:
+        print("❌ После фильтрации по периоду корпус пуст. Проверьте границы года.")
+        return
+
     # 2. Топ-N слов
     top_words = get_top_words(corpus, top_n, russian_stopwords)
     if len(top_words) < 2:
         print("❌ Слишком мало слов для построения карты.")
         return
 
-    # ✅ ПРОВЕРКА: должно быть ровно top_n слов
-    assert len(top_words) == top_n, f"❌ ОШИБКА: получилось {len(top_words)} слов вместо {top_n}!"
-    print(f"  ✅ Проверка пройдена: ровно {len(top_words)} слов в топе")
+    if len(top_words) < top_n:
+        print(f"  ⚠️ Доступно только {len(top_words)} слов для карты вместо {top_n} из-за фильтра периода.")
 
     # Частоты нужны для размера точек на карте
     # ВАЖНО: используем ТОТЖЕ ФИЛЬТР, что и в get_top_words()
@@ -282,6 +312,10 @@ def build_word_cluster_map(
                     and (lemma not in russian_stopwords or lemma in AUTHOR_PRONOUNS)
                 ):
                     freq[lemma] += 1
+
+    if len(top_words) < n_clusters:
+        print(f"  ⚠️ Слов в топе ({len(top_words)}) меньше количества кластеров ({n_clusters}), уменьшаю n_clusters до {len(top_words)}.")
+        n_clusters = len(top_words)
 
     # 3. Матрица Индексу ДИКС
     matrix = build_proximity_matrix(
@@ -300,4 +334,41 @@ def build_word_cluster_map(
 
 
 if __name__ == "__main__":
-    build_word_cluster_map()
+    parser = argparse.ArgumentParser(
+        description="Построить карту слов на основе корпуса с возможным ограничением периода."
+    )
+    parser.add_argument("--database-path", default=DATABASE_PATH, help="Путь к файлу database.parquet")
+    parser.add_argument("--output-path", default=OUTPUT_PATH, help="Путь для сохранения карты JSON")
+    parser.add_argument("--top-n", type=int, default=TOP_N_WORDS, help="Сколько слов использовать в карте")
+    parser.add_argument("--n-clusters", type=int, default=N_CLUSTERS, help="Сколько кластеров строить")
+    parser.add_argument("--year-start", type=int, help="Начало периода (включительно), например 1918")
+    parser.add_argument("--year-end", type=int, help="Конец периода (включительно), например 1938")
+    parser.add_argument("--period", type=str, help="Период в формате ГГГГ-ГГГГ, например 1918-1938")
+    parser.add_argument("--umap-n-neighbors", type=int, default=UMAP_N_NEIGHBORS, help="Параметр n_neighbors для UMAP")
+    parser.add_argument("--umap-min-dist", type=float, default=UMAP_MIN_DIST, help="Параметр min_dist для UMAP")
+    parser.add_argument("--random-state", type=int, default=RANDOM_STATE, help="Случайное состояние для воспроизводимости")
+
+    args = parser.parse_args()
+
+    year_start = args.year_start
+    year_end = args.year_end
+    if args.period:
+        try:
+            year_start, year_end = map(int, args.period.split("-", 1))
+        except ValueError:
+            parser.error("Параметр --period должен иметь формат ГГГГ-ГГГГ, например 1918-1938")
+
+    build_word_cluster_map(
+        database_path=args.database_path,
+        output_path=args.output_path,
+        top_n=args.top_n,
+        n_clusters=args.n_clusters,
+        decay_distance=DECAY_DISTANCE,
+        decay_brks=DECAY_BRKS,
+        decay_sents=DECAY_SENTS,
+        year_start=year_start,
+        year_end=year_end,
+        umap_n_neighbors=args.umap_n_neighbors,
+        umap_min_dist=args.umap_min_dist,
+        random_state=args.random_state,
+    )

@@ -13,12 +13,13 @@ import pandas as pd
 from collections import Counter, defaultdict
 from src.utils import russian_stopwords
 from src.prompt import prepare_llm_prompt, prompt_prefix
-from src.analyzer import navec, full_word_analysis, get_unique_synonyms, filter_synonyms_by_corpus, calculate_delta_analysis
+from src.analyzer import navec, full_word_analysis, get_unique_synonyms, filter_synonyms_by_corpus, calculate_delta_analysis, calculate_diachronic_log_likelihood
 from src.prompt import proximity_neighbours_for_synonyms, synonyms_proximity_index
 from dotenv import load_dotenv
 
 load_dotenv()
 deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+cluster_maps_interpr_link = os.getenv("CLUSTER_MAPS_INTERPR_LINK")
 
 @st.cache_data
 def load_data():
@@ -51,6 +52,40 @@ def load_cluster_map():
     Возвращает pd.DataFrame или None, если файл не существует.
     """
     map_path = os.path.join('data', 'word_cluster_map.json')
+    if not os.path.exists(map_path):
+        return None
+    try:
+        with open(map_path, 'r', encoding='utf-8') as f:
+            records = json.load(f)
+        return pd.DataFrame(records)
+    except Exception as e:
+        st.error(f"Ошибка при загрузке семантической карты: {e}")
+        return None
+    
+@st.cache_data
+def load_cluster_map_first_period():
+    """
+    Загружает предрассчитанную семантическую карту (индекс ДИКС + UMAP + K-Means).
+    Возвращает pd.DataFrame или None, если файл не существует.
+    """
+    map_path = os.path.join('data', 'word_map_1918_1938.json')
+    if not os.path.exists(map_path):
+        return None
+    try:
+        with open(map_path, 'r', encoding='utf-8') as f:
+            records = json.load(f)
+        return pd.DataFrame(records)
+    except Exception as e:
+        st.error(f"Ошибка при загрузке семантической карты: {e}")
+        return None
+
+@st.cache_data
+def load_cluster_map_last_period():
+    """
+    Загружает предрассчитанную семантическую карту (индекс ДИКС + UMAP + K-Means).
+    Возвращает pd.DataFrame или None, если файл не существует.
+    """
+    map_path = os.path.join('data', 'word_map_1946_1958.json')
     if not os.path.exists(map_path):
         return None
     try:
@@ -474,7 +509,7 @@ if st.sidebar.button("ℹ️ Что такое индекс ДИКС?", use_cont
     show_diks_index_help()
 
 # --- Глобальные вкладки ---
-tab_search, tab_corpus, tab_neologisms = st.tabs(["🔍 Анализ слова", "📊 Статистика корпуса", "📝 Неологизмы (beta)"])
+tab_search, tab_corpus, tab_lexical_comparison = st.tabs(["🔍 Анализ слова", "📊 Статистика корпуса", "📝 Лексические пласты"])
 
 # ══════════════════════════════════════════════════════════════
 # ВКЛАДКА 1: Анализ слова
@@ -1154,9 +1189,183 @@ with tab_corpus:
 # ══════════════════════════════════════════════════════════════
 # ВКЛАДКА 3: Лексические пласты
 # ══════════════════════════════════════════════════════════════
-with tab_neologisms:
-    st.markdown("## 📝 Неологизмы Заболоцкого")
-    st.markdown("Слова, встречающиеся **только один раз** в его творчестве и **отсутствующие** в творчестве его современников (1900-1930)")
+with tab_lexical_comparison:
+
+    st.markdown("## 📝 Лексические пласты Заболоцкого")
+
+    if isinstance(full_corpus, pd.DataFrame):
+        df = full_corpus.copy()
+    else:
+        # Если пришел список словарей (list), списки объектов или что-то еще
+        df = pd.DataFrame(list(full_corpus))
+        
+    # Сбрасываем индексы, чтобы избежать внутренних конфликтов масок в pandas
+    df = df.reset_index(drop=True)
+
+    df['year_int'] = pd.to_numeric(df['year_finished'], errors='coerce')
+    min_available_year = int(df['year_int'].min()) if not df['year_int'].isnull().all() else 1920
+    max_available_year = int(df['year_int'].max()) if not df['year_int'].isnull().all() else 1958
+
+    st.markdown("""
+    Эта вкладка позволяет сравнить лексику Заболоцкого между двумя любыми периодами его творчества. 
+    Метод находит слова, которые в **Исследуемом периоде** используются значимо чаще, чем в **Референсном**.
+    """)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("🎯 Исследуемый период (Target)")
+        target_range = st.slider("Выберите диапазон годов", min_available_year, max_available_year, (1946, max_available_year), key="t_slide")
+
+    with col2:
+        st.subheader("📚 Референсный период (Reference)")
+        ref_range = st.slider("Выберите диапазон годов для сравнения", min_available_year, max_available_year, (min_available_year, 1933), key="r_slide")
+
+    top_k = st.number_input("Количество результатов", min_value=5, max_value=100, value=25)
+
+    if st.button("🚀 Запустить корпусный анализ", type="primary"):
+        if target_range[0] == ref_range[0] and target_range[1] == ref_range[1]:
+            st.warning("⚠️ Периоды полностью совпадают. Сравнение не имеет математического смысла.")
+        else:
+            with st.spinner("Рассчитываем метрику логарифмического правдоподобия..."):
+                keywords, total_t, total_r = calculate_diachronic_log_likelihood(
+                    df, target_range, ref_range, top_n=top_k
+                )
+                label_col = "Лексема (Маркер)"
+                file_prefix = "words"
+                
+            if not keywords:
+                st.error("В выбранных диапазонах годов не найдено достаточно данных.")
+            else:
+                m_col1, m_col2 = st.columns(2)
+                m_col1.metric(f"Всего слов в исследуемом корпусе", f"{total_t:,}")
+                m_col2.metric(f"Всего слов в референсном корпусе", f"{total_r:,}")
+                
+                st.success(f"Анализ завершен! Найдено {len(keywords)} лексем (p < 0.05).")
+                
+                res_data = []
+                for rank, (item, score) in enumerate(keywords, 1):
+                    res_data.append({
+                        "Ранг": rank,
+                        label_col: item,
+                        "Сила связи (Log-Likelihood)": round(score, 2),
+                        "Значимость": "Высокая (p < 0.01)" if score > 6.63 else "Стандартная (p < 0.05)"
+                    })
+                    
+                res_df = pd.DataFrame(res_data)
+                st.dataframe(res_df.set_index("Ранг"), use_container_width=True)
+                
+                csv_buffer = res_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Скачать результаты (.CSV)",
+                    data=csv_buffer,
+                    file_name=f"zabolotsky_{file_prefix}_{target_range[0]}-{target_range[1]}_vs_{ref_range[0]}-{ref_range[1]}.csv",
+                    mime="text/csv"
+                )
+
+    st.markdown('## Сравнение семантических карт')
+
+    # Синхронизированный поиск: ввод в этом поле подсвечивает слово на обеих картах
+    sync_search = st.text_input("🔎 Синхронизированный поиск (подсветка в обеих картах)", key="sync_map_search")
+
+    # Вертикальное расположение карт (одна под другой) для удобства масштабирования
+    st.subheader("Карта — период 1918–1938")
+    cluster_map_1 = load_cluster_map_first_period()
+    if cluster_map_1 is None:
+        st.info(
+            "Карта для периода 1918–1938 не найдена. Сгенерируйте её через:\n" \
+            "`python -m src.map_builder --period 1918-1938 --output-path data/word_map_1918_1938.json`"
+        )
+    else:
+        with st.expander("Параметры карты (период 1)"):
+            sm_size_by_freq_1 = st.checkbox("Размер ~ частота (период 1)", value=True, key="map1_size")
+
+            cluster_palette = [
+                "#E63946", "#457B9D", "#2A9D8F", "#E9C46A", "#F4A261",
+                "#9B5DE5", "#00BBF9", "#F15BB5", "#06D6A0", "#FB5607",
+                "#8338EC", "#3A86FF", "#FFBE0B", "#FF006E", "#8AC926",
+                "#DC2F02", "#370617", "#03071E", "#D62828", "#F77F00",
+            ]
+
+            cluster_rows = []
+            for cluster_id in sorted(cluster_map_1["cluster"].unique()):
+                color = cluster_palette[(cluster_id - 1) % len(cluster_palette)]
+                lemmas = sorted(cluster_map_1[cluster_map_1["cluster"] == cluster_id]["word"].tolist())
+                cluster_rows.append({
+                    "Кластер": int(cluster_id),
+                    "Цвет": color,
+                    "Леммы": ", ".join(lemmas)
+                })
+
+            st.dataframe(pd.DataFrame(cluster_rows), use_container_width=True)
+
+        highlight_word_1 = sync_search.strip().lower()
+
+        fig1 = build_mayak_semantic_map(cluster_map_1, sorted(cluster_map_1["cluster"].unique().tolist()), sm_size_by_freq_1)
+
+        # Добавляем подсветку слова, если задано
+        if highlight_word_1:
+            match = cluster_map_1[cluster_map_1["word"] == highlight_word_1]
+            if not match.empty:
+                r = match.iloc[0]
+                fig1.add_trace(go.Scatter(
+                    x=[r['x']], y=[r['y']], mode='markers+text', text=[r['word']], textposition='top center',
+                    marker=dict(size=30, color='#FFFF00', symbol='star', line=dict(width=1, color='#333333')),
+                    showlegend=False, hoverinfo='text', name='highlight'
+                ))
+                st.success(f"**{r['word']}** — Кластер {int(r['cluster'])}, частота: {int(r['freq'])}")
+
+        st.plotly_chart(fig1, use_container_width=True)
+
+    st.markdown("---")
+
+    st.subheader("Карта — период 1946–1958")
+    cluster_map_2 = load_cluster_map_last_period()
+    if cluster_map_2 is None:
+        st.info(
+            "Карта для периода 1946–1958 не найдена. Сгенерируйте её через:\n" \
+            "`python -m src.map_builder --period 1946-1958 --output-path data/word_map_1946_1958.json`"
+        )
+    else:
+        with st.expander("Параметры карты (период 2)"):
+            sm_size_by_freq_2 = st.checkbox("Размер ~ частота (период 2)", value=True, key="map2_size")
+
+            cluster_palette = [
+                "#E63946", "#457B9D", "#2A9D8F", "#E9C46A", "#F4A261",
+                "#9B5DE5", "#00BBF9", "#F15BB5", "#06D6A0", "#FB5607",
+                "#8338EC", "#3A86FF", "#FFBE0B", "#FF006E", "#8AC926",
+                "#DC2F02", "#370617", "#03071E", "#D62828", "#F77F00",
+            ]
+
+            cluster_rows = []
+            for cluster_id in sorted(cluster_map_2["cluster"].unique()):
+                color = cluster_palette[(cluster_id - 1) % len(cluster_palette)]
+                lemmas = sorted(cluster_map_2[cluster_map_2["cluster"] == cluster_id]["word"].tolist())
+                cluster_rows.append({
+                    "Кластер": int(cluster_id),
+                    "Цвет": color,
+                    "Леммы": ", ".join(lemmas)
+                })
+
+            st.dataframe(pd.DataFrame(cluster_rows), use_container_width=True)
+
+        highlight_word_2 = sync_search.strip().lower()
+
+        fig2 = build_mayak_semantic_map(cluster_map_2, sorted(cluster_map_2["cluster"].unique().tolist()), sm_size_by_freq_2)
+
+        if highlight_word_2:
+            match = cluster_map_2[cluster_map_2["word"] == highlight_word_2]
+            if not match.empty:
+                r = match.iloc[0]
+                fig2.add_trace(go.Scatter(
+                    x=[r['x']], y=[r['y']], mode='markers+text', text=[r['word']], textposition='top center',
+                    marker=dict(size=30, color='#FFFF00', symbol='star', line=dict(width=1, color='#333333')),
+                    showlegend=False, hoverinfo='text', name='highlight'
+                ))
+                st.success(f"**{r['word']}** — Кластер {int(r['cluster'])}, частота: {int(r['freq'])}")
+
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.link_button("Посмотреть подготовленную интерпретацию карт от LLM", cluster_maps_interpr_link)
 
     st.info(
         "⚠️ **BETA версия**: Функционал анализа неологизмов находится в стадии разработки. "

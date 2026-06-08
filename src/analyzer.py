@@ -1,6 +1,8 @@
 import os
 import re
 import json
+import math
+import pandas as pd
 from collections import Counter
 from navec import Navec
 from src.utils import read_text_file, get_sentences, ms, count_words
@@ -504,3 +506,82 @@ def filter_synonyms_by_corpus(synonyms):
     filtered_synonyms = [syn for syn, score in synonyms if syn in vocab_set]
     
     return filtered_synonyms
+
+# --- CALCULATION OF LOG-LIKELIHOOD FOR KEYWORD EXTRACTION ---
+
+def calculate_log_likelihood_value(c, d, total_c, total_d):
+    """
+    Рассчитывает Log-Likelihood (G-score) для ключевых слов.
+    """
+    E1 = total_c * (c + d) / (total_c + total_d)
+    E2 = total_d * (c + d) / (total_c + total_d)
+    
+    log_part1 = math.log(c / E1) if c > 0 and E1 > 0 else 0
+    log_part2 = math.log(d / E2) if d > 0 and E2 > 0 else 0
+    
+    ll_score = 2 * (c * log_part1 + d * log_part2)
+    return -ll_score if c < E1 else ll_score
+
+def calculate_diachronic_log_likelihood(df, target_years, reference_years, top_n=30):
+    """
+    Динамически собирает корпуса за указанные периоды годов и рассчитывает ключевые слова.
+    Безопасно работает с pd.DataFrame на входе.
+    """
+    # 0. Конвертируем список словарей в DataFrame если нужно
+    if isinstance(df, list):
+        df = pd.DataFrame(df)
+    
+    # 1. Убеждаемся, что колонка года переведена в числа (на случай, если в интерфейсе что-то пошло не так)
+    df = df.copy()
+    df['year_int'] = pd.to_numeric(df['year_finished'], errors='coerce')
+    
+    # 2. Фильтруем подкорпуса по диапазонам годов
+    df_target = df[(df['year_int'] >= target_years[0]) & (df['year_int'] <= target_years[1])]
+    df_ref = df[(df['year_int'] >= reference_years[0]) & (df['year_int'] <= reference_years[1])]
+    
+    # 3. Безопасно собираем плоские списки лемм через .to_list()
+    target_lemmas = []
+    if not df_target.empty and 'lemmas_cleaned' in df_target.columns:
+        # Итерируемся по массиву списков предложений
+        for doc in df_target['lemmas_cleaned'].to_list():
+            if isinstance(doc, (list, object)):  # проверка на случай пустых строк
+                for sentence in doc:
+                    target_lemmas.extend(sentence)
+            
+    ref_lemmas = []
+    if not df_ref.empty and 'lemmas_cleaned' in df_ref.columns:
+        for doc in df_ref['lemmas_cleaned'].to_list():
+            if isinstance(doc, (list, object)):
+                for sentence in doc:
+                    ref_lemmas.extend(sentence)
+                    
+    # Если один из подкорпусов пустой — выходим, чтобы не делить на ноль
+    if not target_lemmas or not ref_lemmas:
+        return [], 0, 0
+        
+    # 4. Считаем частоты слов
+    target_counts = Counter(target_lemmas)
+    ref_counts = Counter(ref_lemmas)
+    
+    total_target = sum(target_counts.values())
+    total_ref = sum(ref_counts.values())
+    
+    ll_results = {}
+    for word, c in target_counts.items():
+        # Базовая фильтрация знаков препинания и слишком коротких ошметков
+        if not word.isalpha() or len(word) < 2:
+            continue
+        d = ref_counts.get(word, 0)
+        
+        score = calculate_log_likelihood_value(c, d, total_target, total_ref)
+        ll_results[word] = score
+        
+    # Отсекаем по критическому порогу статистической значимости (G2 > 3.84)
+    sorted_keywords = sorted(
+        [(word, score) for word, score in ll_results.items() if score > 3.84],
+        key=lambda x: x[1], 
+        reverse=True
+    )
+    
+    return sorted_keywords[:top_n], total_target, total_ref
+
