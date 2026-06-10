@@ -602,6 +602,7 @@ with tab_search:
             if compare_periods and results_2:
                 # Извлекаем данные для обоих периодов
                 total_occurrences_2 = results_2['total_occurrences']
+                contexts_2 = results_2['contexts']
                 year_dist_2 = results_2['year_dist']
                 pos_dist_2 = results_2['pos_dist']
 
@@ -611,6 +612,8 @@ with tab_search:
 
                 with col1_metric:
                     st.metric("Всего употреблений", total_occurrences)
+                    total_texts_1 = len(set(ctx.get('Произведение', '') for ctx in contexts if ctx.get('Произведение')))
+                    st.metric("Всего текстов с леммой:", total_texts_1)
 
                 with col1_pos:
                     st.caption("Частеречное окружение")
@@ -632,6 +635,8 @@ with tab_search:
 
                 with col2_metric:
                     st.metric("Всего употреблений", total_occurrences_2)
+                    total_texts_2 = len(set(ctx.get('Произведение', '') for ctx in contexts_2 if ctx.get('Произведение')))
+                    st.metric("Всего текстов с леммой:", total_texts_2)
 
                 with col2_pos:
                     st.caption("Частеречное окружение")
@@ -661,6 +666,8 @@ with tab_search:
                 with col_metric:
                     st.subheader("Статистика")
                     st.metric("Всего употреблений", total_occurrences)
+                    total_texts = len(set(ctx.get('Произведение', '') for ctx in contexts if ctx.get('Произведение')))
+                    st.metric("Всего текстов с леммой:", total_texts)
 
                 with col_pos:
                     st.subheader("Частеречное окружение")
